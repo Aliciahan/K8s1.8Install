@@ -118,47 +118,6 @@ req:
 
 clean:
 	rm -rf certs
-[root@localhost tls-setup]# cat Makefile
-.PHONY: cfssl ca req clean
-
-CFSSL	= @env PATH=$(GOPATH)/bin:$(PATH) cfssl
-JSON	= env PATH=$(GOPATH)/bin:$(PATH) cfssljson
-
-all: ca req
-
-#cfssl:
-#	go get -u -tags nopkcs11 github.com/cloudflare/cfssl/cmd/cfssl
-#	go get -u github.com/cloudflare/cfssl/cmd/cfssljson
-#	go get -u github.com/mattn/goreman
-
-ca:
-	mkdir -p certs
-	$(CFSSL) gencert -initca config/ca-csr.json | $(JSON) -bare certs/ca
-
-req:
-	$(CFSSL) gencert \
-	  -ca certs/ca.pem \
-	  -ca-key certs/ca-key.pem \
-	  -config config/ca-config.json \
-	  config/req-csr.json | $(JSON) -bare certs/etcd1
-	$(CFSSL) gencert \
-	  -ca certs/ca.pem \
-	  -ca-key certs/ca-key.pem \
-	  -config config/ca-config.json \
-	  config/req-csr.json | $(JSON) -bare certs/etcd2
-	$(CFSSL) gencert \
-	  -ca certs/ca.pem \
-	  -ca-key certs/ca-key.pem \
-	  -config config/ca-config.json \
-	  config/req-csr.json | $(JSON) -bare certs/etcd3
-	$(CFSSL) gencert \
-	  -ca certs/ca.pem \
-	  -ca-key certs/ca-key.pem \
-	  -config config/ca-config.json \
-	  config/req-csr.json | $(JSON) -bare certs/proxy1
-
-clean:
-	rm -rf certs
 ~~~
 
 6. Distribute them to machines
@@ -234,4 +193,149 @@ https://192.168.94.136:2379 is healthy: successfully committed proposal: took = 
 157821c7d00252a2, started, M136, https://192.168.94.136:2380, https://192.168.94.136:2379
 6d28ea3bc3b20778, started, M134, https://192.168.94.134:2380, https://192.168.94.134:2379
 ~~~
+
+<h2 id="flannel"> Installation Flannel </h2>
+
+
+1. Before Start 
+
+Install Docker and make it running. Verify that the etcd services are running.
+
+> yum install -y docker && systemctl enable docker && systemctl start docker
+
+2. Generate certificates
+
+We are going to use the same ca.pem and ca-config.json of etcd. But generate the new flannel pem files ourselves. I wrote a script ./tls-setup/flanneld/makeCertFlannel.sh 
+
+~~~bash 
+
+#!/bin/bash
+
+cat > flanneld-csr.json <<EOF
+{
+  "CN": "flanneld",
+  "hosts": [],
+  "key": {
+    "algo": "rsa",
+    "size": 2048
+  },
+  "names": [
+    {
+      "C": "CN",
+      "ST": "BeiJing",
+      "L": "BeiJing",
+      "O": "k8s",
+      "OU": "System"
+    }
+  ]
+}
+EOF
+
+#!/bin/bash
+
+cfssl gencert -ca=../certs/ca.pem \
+  -ca-key=../certs/ca-key.pem \
+  -config=../config/ca-config.json \
+  flanneld-csr.json | cfssljson -bare flanneld
+#>
+~~~
+
+
+
+3. Distribute these files 
+
+> mkdir -p /etc/flanneld/ssl
+> cp flanneld\* /etc/flanneld/ssl
+
+4. Install flanneld
+
+> yum install -y flannel
+
+5. Configure flannel service 
+
+Here is an example : 
+
+~~~bash
+[Unit]
+Description=Flanneld overlay address etcd agent
+After=network.target
+After=network-online.target
+Wants=network-online.target
+After=etcd.service
+Before=docker.service
+
+[Service]
+Type=notify
+EnvironmentFile=/etc/sysconfig/flanneld
+EnvironmentFile=-/etc/sysconfig/docker-network
+ExecStart=/usr/bin/flanneld-start \
+  -etcd-cafile=/etc/etcd/ssl/ca.pem \
+  -etcd-certfile=/etc/flanneld/ssl/flanneld.pem \
+  -etcd-keyfile=/etc/flanneld/ssl/flanneld-key.pem \
+  -etcd-endpoints=https://192.168.94.134:2379,https://192.168.94.136:2379 \
+  -etcd-prefix=/kubernetes/network \
+  --iface=ens33
+ExecStartPost=/usr/libexec/flannel/mk-docker-opts.sh -k DOCKER_NETWORK_OPTIONS -d /run/flannel/docker
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+RequiredBy=docker.service
+~~~
+
+Pay attention that, for machines have multiple network card, you should indicate the card for communication, with the argument: --iface=xxx. 
+
+
+6. Restart flanneld, and docker. 
+
+After all these reloading, finally, we should find the network as following: 
+
+~~~bash
+
+docker0: flags=4099<UP,BROADCAST,MULTICAST>  mtu 1500
+        inet 172.30.75.1  netmask 255.255.255.0  broadcast 0.0.0.0
+        ether 02:42:62:ae:32:33  txqueuelen 0  (Ethernet)
+        RX packets 0  bytes 0 (0.0 B)
+        RX errors 0  dropped 0  overruns 0  frame 0
+        TX packets 0  bytes 0 (0.0 B)
+        TX errors 0  dropped 0 overruns 0  carrier 0  collisions 0
+
+ens33: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500
+        inet 192.168.94.136  netmask 255.255.255.0  broadcast 192.168.94.255
+        inet6 fe80::b2a2:6704:f908:c3f7  prefixlen 64  scopeid 0x20<link>
+        ether 00:0c:29:23:3d:7b  txqueuelen 1000  (Ethernet)
+        RX packets 718373  bytes 122584723 (116.9 MiB)
+        RX errors 0  dropped 0  overruns 0  frame 0
+        TX packets 682313  bytes 75599413 (72.0 MiB)
+        TX errors 0  dropped 0 overruns 0  carrier 0  collisions 0
+
+flannel.1: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1450
+        inet 172.30.75.0  netmask 255.255.255.255  broadcast 0.0.0.0
+        inet6 fe80::440:fbff:fe92:6d48  prefixlen 64  scopeid 0x20<link>
+        ether 06:40:fb:92:6d:48  txqueuelen 0  (Ethernet)
+        RX packets 0  bytes 0 (0.0 B)
+        RX errors 0  dropped 0  overruns 0  frame 0
+        TX packets 0  bytes 0 (0.0 B)
+        TX errors 0  dropped 8 overruns 0  carrier 0  collisions 0
+
+lo: flags=73<UP,LOOPBACK,RUNNING>  mtu 65536
+        inet 127.0.0.1  netmask 255.0.0.0
+        inet6 ::1  prefixlen 128  scopeid 0x10<host>
+        loop  txqueuelen 1  (Boucle locale)
+        RX packets 4674014  bytes 454004451 (432.9 MiB)
+        RX errors 0  dropped 0  overruns 0  frame 0
+        TX packets 4674014  bytes 454004451 (432.9 MiB)
+        TX errors 0  dropped 0 overruns 0  carrier 0  collisions 0
+~~~
+
+<h2 id="master"> Master Node Configuration</h2>
+
+1. Download Kubernetes Release 
+
+From https://github.com/kubernetes/kubernetes/releases download the recent release.
+
+
+
+
+
 
