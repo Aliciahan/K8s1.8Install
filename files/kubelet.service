@@ -22,7 +22,6 @@ ExecStart=/usr/bin/kubelet \
   --register-node=true \
   --logtostderr=true \
   --fail-swap-on=false \
-  --cgroup-driver=systemd \
   --v=2
 Restart=on-failure
 RestartSec=5
