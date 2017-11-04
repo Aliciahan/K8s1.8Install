@@ -128,6 +128,7 @@ For each machine:
 ssh root@$M134_IP yum install -y etcd
 ssh root@$M134_IP mkdir -p /etc/etcd/ssl
 scp /root/tls-setup/certs/ca.pem root@$M134:/etc/etcd/ssl/
+scp /root/tls-setup/certs/ca-key.pem root@$M134:/etc/etcd/ssl/
 scp /root/tls-setup/certs/etcd1.* root@$M134:/etc/etcd/ssl/
 ssh root@$M134 chown -R etcd:etcd /etc/etcd/ssl
 ssh root@$M134 "chmod -R 644 /etc/etcd/ssl/*"
@@ -333,9 +334,485 @@ lo: flags=73<UP,LOOPBACK,RUNNING>  mtu 65536
 1. Download Kubernetes Release 
 
 From https://github.com/kubernetes/kubernetes/releases download the recent release.
+download the tar.gz file. 
+
+2. Run get script :
+
+Extract the tar file with tar xvf xxxx.tar.gz then :
+
+> cd kubernetes/cluster && ./get-kube-binaries.sh
+
+3. Go to kuberntes/server repository extract the kubernetes-server-linux-amd64.tar.gz
+
+4. Distribute the files:
+
+~~~bash 
+[root@localhost server]# cd bin/
+[root@localhost bin]# pwd
+/root/kubernetes/server/kubernetes/server/bin
+[root@localhost bin]# cp ./kube-apiserver /usr/bin/
+[root@localhost bin]# cp ./kube-controller-manager /usr/bin
+[root@localhost bin]# cp ./kubectl /usr/bin
+[root@localhost bin]# cp ./kube-scheduler /usr/bin
+[root@localhost bin]# cp ./kubelet /usr/bin
+[root@localhost bin]# cp ./kube-proxy /usr/bin
+[root@localhost bin]#
+[root@localhost bin]#
+[root@localhost bin]# scp ./kubelet ./kube-proxy root@192.168.94.136:/usr/bin/
+~~~
+
+5. Generate Certificates :
+
+As we always do: 
+
+- json file:
+
+~~~json
+[root@localhost kubernetes]# cat kubernetes-csr.json
+{
+  "CN": "kubernetes",
+  "hosts": [
+    "127.0.0.1",
+    "192.168.94.134",
+    "172.30.0.1",
+    "kubernetes",
+    "kubernetes.default",
+    "kubernetes.default.svc",
+    "kubernetes.default.svc.cluster",
+    "kubernetes.default.svc.cluster.local"
+  ],
+  "key": {
+    "algo": "rsa",
+    "size": 2048
+  },
+  "names": [
+    {
+      "C": "CN",
+      "ST": "BeiJing",
+      "L": "BeiJing",
+      "O": "k8s",
+      "OU": "System"
+    }
+  ]
+}
+~~~
+
+- generate certificates then distribute 
+
+~~~bash
+[root@localhost kubernetes]# cat getCert.sh
+#!/bin/bash
+
+cfssl gencert -ca=/etc/etcd/ssl/ca.pem \
+  -ca-key=../certs/ca-key.pem \
+  -config=../config/ca-config.json \
+  kubernetes-csr.json | cfssljson -bare kubernetes &&\
+mkdir -p /etc/kubernetes/ssl &&\
+cp kubernetes* /etc/kubernetes/ssl
+#*
+~~~
+
+- make tokens for bootstrap
+
+~~~bash 
+[root@localhost kubernetes]# cat makeToken.sh
+head -c 16 /dev/urandom | od -An -t x | tr -d " " > ./randomToken
+TOKEN=$(cat ./randomToken)
+cat > /etc/kubernetes/token.csv << EOF
+${TOKEN},kubelet-bootstrap,10001,"system:kubelet-bootstrap"
+EOF
+~~~
+
+Do another time for Kubectl
+
+- write json 
+
+~~~json
+
+[root@localhost kubectl]# cat admin-csr.json
+{
+  "CN": "admin",
+  "hosts": [],
+  "key": {
+    "algo": "rsa",
+    "size": 2048
+  },
+  "names": [
+    {
+      "C": "CN",
+      "ST": "BeiJing",
+      "L": "BeiJing",
+      "O": "system:masters",
+      "OU": "System"
+    }
+  ]
+}
+
+~~~
+
+- apply it with cfssl 
+
+~~~bash 
+
+[root@localhost kubectl]# cat getCert.sh
+#!/bin/bash
+
+cfssl gencert -ca=/etc/etcd/ssl/ca.pem \
+  -ca-key=/etc/etcd/ssl/ca-key.pem \
+  -config=../config/ca-config.json \
+  admin-csr.json | cfssljson -bare admin
+
+EXCODE=$?
+if [ "$EXCODE" == "0" ]; then
+    if [[ -d /etc/kubernetes/ssl ]]; then
+        cp ./admin* /etc/kubernetes/ssl/
+    else
+        mkdir -p /etc/kubernetes/ssl && \
+        cp ./admin* /etc/kubernetes/ssl/
+    fi
+fi
+
+~~~
 
 
 
+6. Setup kube-apiserver systemd service
 
+~~~bash
+[root@localhost kubectl]# cat /usr/lib/systemd/system/kube-apiserver.service
+[Unit]
+Description=Kubernetes API Server
+Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+After=network.target
+
+[Service]
+User=root
+ExecStart=/usr/bin/kube-apiserver \
+  --admission-control=NamespaceLifecycle,LimitRanger,ServiceAccount,DefaultStorageClass,ResourceQuota \
+  --advertise-address=192.168.94.134 \
+  --allow-privileged=true \
+  --apiserver-count=3 \
+  --audit-log-maxage=30 \
+  --audit-log-maxbackup=3 \
+  --audit-log-maxsize=100 \
+  --audit-log-path=/var/lib/audit.log \
+  --authorization-mode=Node,RBAC \
+  --bind-address=192.168.94.134 \
+  --client-ca-file=/etc/etcd/ssl/ca.pem \
+  --enable-swagger-ui=true \
+  --etcd-cafile=/etc/etcd/ssl/ca.pem \
+  --etcd-certfile=/etc/kubernetes/ssl/kubernetes.pem \
+  --etcd-keyfile=/etc/kubernetes/ssl/kubernetes-key.pem \
+  --etcd-servers=https://192.168.94.134:2379,https://192.168.94.136:2379 \
+  --event-ttl=1h \
+  --kubelet-https=true \
+  --insecure-bind-address=192.168.94.134 \
+  --runtime-config=rbac.authorization.k8s.io/v1alpha1 \
+  --service-account-key-file=/etc/etcd/ssl/ca-key.pem \
+  --service-cluster-ip-range=10.254.0.0/16 \
+  --service-node-port-range=30000-31000 \
+  --tls-cert-file=/etc/kubernetes/ssl/kubernetes.pem \
+  --tls-private-key-file=/etc/kubernetes/ssl/kubernetes-key.pem \
+  --experimental-bootstrap-token-auth \
+  --token-auth-file=/etc/kubernetes/token.csv \
+  --v=2
+Restart=on-failure
+RestartSec=5
+Type=notify
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+~~~
+
+> systemctl daemon-reload && systemctl start kube-apiserver
+
+7. Setup Controller Manager Service
+
+~~~bash
+
+[root@localhost kubectl]# cat /usr/lib/systemd/system/kube-controller-manager.service
+[Unit]
+Description=Kubernetes Controller Manager
+Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+
+[Service]
+ExecStart=/usr/bin/kube-controller-manager \
+  --address=127.0.0.1 \
+  --allocate-node-cidrs=true \
+  --cluster-cidr=172.30.0.0/16 \
+  --cluster-name=kubernetes \
+  --cluster-signing-cert-file=/etc/etcd/ssl/ca.pem \
+  --cluster-signing-key-file=/etc/etcd/ssl/ca-key.pem \
+  --leader-elect=true \
+  --master=http://192.168.94.134:8080 \
+  --root-ca-file=/etc/etcd/ssl/ca.pem \
+  --service-account-private-key-file=/etc/etcd/ssl/ca-key.pem \
+  --service-cluster-ip-range=10.254.0.0/16 \
+  --v=2
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+~~~
+
+8. Setup kube-scheduler
+
+~~~bash
+
+[root@localhost kubectl]# cat /usr/lib/systemd/system/kube-scheduler.service
+[Unit]
+Description=Kubernetes Scheduler
+Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+
+[Service]
+ExecStart=/usr/bin/kube-scheduler \
+  --leader-elect=true \
+  --master=http://192.168.93.134:8080 \
+  --address=127.0.0.1 \
+  --v=2
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+
+~~~
+
+9. Configure kubectl
+
+~~~bash
+[root@localhost kubectl]# cat setupKubectl.sh
+#!/bin/bash
+
+kubectl config set-cluster kubernetes \
+  --certificate-authority=/etc/etcd/ssl/ca.pem \
+  --embed-certs=true \
+  --server=https://192.168.94.134:6443
+kubectl config set-credentials admin \
+  --client-certificate=/etc/kubernetes/ssl/admin.pem \
+  --embed-certs=true \
+  --client-key=/etc/kubernetes/ssl/admin-key.pem
+kubectl config set-context kubernetes \
+  --cluster=kubernetes \
+  --user=admin
+kubectl config use-context kubernetes
+
+~~~
+
+**DON'T FORGET to distribute the ~/.kube/config to all nodes running kubelet**
+
+10. Test Kubectl :
+
+~~~bash
+[root@localhost kubectl]# kubectl get cs
+NAME                 STATUS    MESSAGE              ERROR
+scheduler            Healthy   ok
+controller-manager   Healthy   ok
+etcd-0               Healthy   {"health": "true"}
+etcd-1               Healthy   {"health": "true"}
+
+~~~
+
+<h2 id="node"> Node Configuration </h2>
+
+1. add role to cluster (configure kubectl)
+
+> kubectl create clusterrolebinding kubelet-bootstrap --clusterrole=system:node-bootstrapper --user=kubelet-bootstrap
+
+--user=kubelet-bootstrap is the username indicated in /etc/kubernetes/token.csv
+
+This is written in to the /etc/kubernetes/bootstrap.config
+
+2. Copy kubelet kube-proxy to Node
+
+Already done
+
+> mkdir -p /var/lib/kubelet
+
+3. Build bootstrap.config file
+
+~~~bash
+[root@localhost kubernetes1.8Install]# cat ./configBootStrapConfig.sh
+#!/bin/bash
+
+# 设置集群参数
+kubectl config set-cluster kubernetes \
+  --certificate-authority=/etc/kubernetes/ssl/ca.pem \
+  --embed-certs=true \
+  --server=https://192.168.94.134:6443 \
+  --kubeconfig=bootstrap.kubeconfig
+# 设置客户端认证参数
+kubectl config set-credentials kubelet-bootstrap \
+    --token=$(cat ./tls-setup/kubernetes/randomToken) \
+  --kubeconfig=bootstrap.kubeconfig
+# 设置上下文参数
+kubectl config set-context default \
+  --cluster=kubernetes \
+  --user=kubelet-bootstrap \
+  --kubeconfig=bootstrap.kubeconfig
+# 设置默认上下文
+kubectl config use-context default --kubeconfig=bootstrap.kubeconfig
+cp bootstrap.kubeconfig /etc/kubernetes/
+~~~
+
+4. Configure Kubelet service :
+
+~~~bash
+[root@localhost kubernetes1.8Install]# cat /usr/lib/systemd/system/kubelet.service
+[Unit]
+Description=Kubernetes Kubelet
+Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+After=docker.service
+Requires=docker.service
+
+[Service]
+WorkingDirectory=/var/lib/kubelet
+ExecStart=/usr/bin/kubelet \
+  --address=192.168.94.134 \
+  --hostname-override=192.168.94.134 \
+  --pod-infra-container-image=registry.access.redhat.com/rhel7/pod-infrastructure:latest \
+  --experimental-bootstrap-kubeconfig=/etc/kubernetes/bootstrap.kubeconfig \
+  --kubeconfig=/etc/kubernetes/kubelet-kubeconfig \
+  --cert-dir=/etc/kubernetes/ssl \
+  --container-runtime=docker \
+  --cluster-dns=10.254.0.2 \
+  --cluster-domain=cluster.local. \
+  --hairpin-mode promiscuous-bridge \
+  --allow-privileged=true \
+  --serialize-image-pulls=false \
+  --register-node=true \
+  --logtostderr=true \
+  --fail-swap-on=false \
+  --cgroup-driver=systemd \
+  --v=2
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+~~~
+
+5. Start Service with systemctl 
+
+6. Approve the certificate
+
+~~~bash
+[root@localhost kubernetes1.8Install]# kubectl get csr
+NAME                                                   AGE       REQUESTOR           CONDITION
+node-csr-erT8KExDNg_qHlvGOzGCndwK4mZBslTBHGpXuZAIPyM   28s       kubelet-bootstrap   Pending
+
+[root@localhost kubernetes1.8Install]# kubectl certificate approve node-csr-erT8KExDNg_qHlvGOzGCndwK4mZBslTBHGpXuZAIPyM
+certificatesigningrequest "node-csr-erT8KExDNg_qHlvGOzGCndwK4mZBslTBHGpXuZAIPyM" approved
+
+[root@localhost kubernetes1.8Install]# kubectl get nodes
+NAME             STATUS    ROLES     AGE       VERSION
+192.168.94.134   Ready     <none>    6s        v1.8.2
+~~~
+
+<h2 id="kube-proxy"> Configure Kube-Proxy</h2>
+
+
+1. Generate Certificates :
+
+~~~json
+[root@localhost kube-proxy]# cat kube-proxy-csr.json
+{
+  "CN": "system:kube-proxy",
+  "hosts": [],
+  "key": {
+    "algo": "rsa",
+    "size": 2048
+  },
+  "names": [
+    {
+      "C": "CN",
+      "ST": "BeiJing",
+      "L": "BeiJing",
+      "O": "k8s",
+      "OU": "System"
+    }
+  ]
+}
+~~~
+
+- get pem files
+
+~~~bash
+[root@localhost kube-proxy]# cat getCsr.sh
+#!/bin/bash
+
+cfssl gencert -ca=../certs/ca.pem \
+  -ca-key=../certs/ca-key.pem \
+  -config=../config/ca-config.json \
+  kube-proxy-csr.json | cfssljson -bare kube-proxy &&\
+cp ./kube-proxy* /etc/kubernetes/ssl/
+#*
+~~~
+
+
+- distribute them to /etc/kubernetes/ssl 
+
+2. Generate kubeconfig file
+
+[root@localhost kube-proxy]# cat generateKubeConfig.sh
+#!/bin/bash
+
+kubectl config set-cluster kubernetes \
+--certificate-authority=/etc/etcd/ssl/ca.pem \
+--embed-certs=true \
+--server=https://192.168.94.134:6443 \
+--kubeconfig=kube-proxy.kubeconfig
+# 设置客户端认证参数
+kubectl config set-credentials kube-proxy \
+--client-certificate=/etc/kubernetes/ssl/kube-proxy.pem \
+--client-key=/etc/kubernetes/ssl/kube-proxy-key.pem \
+--embed-certs=true \
+--kubeconfig=kube-proxy.kubeconfig
+# 设置上下文参数
+kubectl config set-context default \
+--cluster=kubernetes \
+--user=kube-proxy \
+--kubeconfig=kube-proxy.kubeconfig
+# 设置默认上下文
+kubectl config use-context default --kubeconfig=kube-proxy.kubeconfig
+cp kube-proxy.kubeconfig /etc/kubernetes/
+
+~~~
+
+We should copy this file to all nodes.
+
+
+3. Make WorkingDirectory : 
+
+
+ mkdir -p /var/lib/kube-proxy
+
+4. Edit kube-proxy.service
+
+ [root@localhost kube-proxy]# cat /usr/lib/systemd/system/kube-proxy.service
+[Unit]
+Description=Kubernetes Kube-Proxy Server
+Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+After=network.target
+
+[Service]
+WorkingDirectory=/var/lib/kube-proxy
+ExecStart=/usr/bin/kube-proxy \
+  --bind-address=192.168.94.134 \
+  --hostname-override=192.168.94.134 \
+  --cluster-cidr=172.30.0.0/16 \
+  --kubeconfig=/etc/kubernetes/kube-proxy.kubeconfig \
+  --logtostderr=true \
+  --v=2
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+
+5. Start Service
 
 
