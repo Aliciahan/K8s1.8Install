@@ -1,0 +1,34 @@
+[Unit]
+Description=Etcd Server
+After=network.target
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+WorkingDirectory=/var/lib/etcd/
+EnvironmentFile=-/etc/etcd/etcd.conf
+User=etcd
+# set GOMAXPROCS to number of processors
+ExecStart=/usr/bin/etcd \
+  --name "M134" \
+  --initial-advertise-peer-urls https://192.168.94.134:2380 \
+  --listen-peer-urls https://192.168.94.134:2380 \
+  --listen-client-urls https://192.168.94.134:2379,https://127.0.0.1:2379 \
+  --advertise-client-urls https://192.168.94.134:2379 \
+  --initial-cluster-token etcd-cluster-1 \
+  --initial-cluster M134=https://192.168.94.134:2380,M136=https://192.168.94.136:2380 \
+  --initial-cluster-state new \
+  --client-cert-auth \
+  --trusted-ca-file=/etc/etcd/ssl/ca.pem \
+  --cert-file=/etc/etcd/ssl/etcd1.pem \
+  --key-file=/etc/etcd/ssl/etcd1-key.pem \
+  --peer-client-cert-auth \
+  --peer-trusted-ca-file=/etc/etcd/ssl/ca.pem \
+  --peer-cert-file=/etc/etcd/ssl/etcd1.pem \
+  --peer-key-file=/etc/etcd/ssl/etcd1-key.pem
+Restart=on-failure
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

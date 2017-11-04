@@ -1,0 +1,23 @@
+[Unit]
+Description=Kubernetes Controller Manager
+Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+
+[Service]
+ExecStart=/usr/bin/kube-controller-manager \
+  --address=127.0.0.1 \
+  --allocate-node-cidrs=true \
+  --cluster-cidr=172.30.0.0/16 \
+  --cluster-name=kubernetes \
+  --cluster-signing-cert-file=/etc/etcd/ssl/ca.pem \
+  --cluster-signing-key-file=/etc/etcd/ssl/ca-key.pem \
+  --leader-elect=true \
+  --master=http://192.168.94.134:8080 \
+  --root-ca-file=/etc/etcd/ssl/ca.pem \
+  --service-account-private-key-file=/etc/etcd/ssl/ca-key.pem \
+  --service-cluster-ip-range=10.254.0.0/16 \
+  --v=2
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
